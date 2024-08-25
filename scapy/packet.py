@@ -35,6 +35,7 @@ from scapy.fields import (
     MayEnd,
     MultiEnumField,
     MultipleTypeField,
+    PadField,
     PacketListField,
     RawVal,
     StrField,
@@ -100,7 +101,8 @@ class Packet(
         "direction", "sniffed_on",
         # handle snaplen Vs real length
         "wirelen",
-        "comment"
+        "comment",
+        "process_information"
     ]
     name = None
     fields_desc = []  # type: List[AnyField]
@@ -178,6 +180,7 @@ class Packet(
         self.direction = None  # type: Optional[int]
         self.sniffed_on = None  # type: Optional[_GlobInterfaceType]
         self.comment = None  # type: Optional[bytes]
+        self.process_information = None  # type: Optional[Dict[str, Any]]
         self.stop_dissection_after = stop_dissection_after
         if _pkt:
             self.dissect(_pkt)
@@ -662,10 +665,10 @@ class Packet(
             # avoid copying whole packets (perf: #GH3894)
             if fld.islist:
                 return [
-                    _cpy(x.fields) for x in val
+                    (_cpy(x.fields), x.payload.raw_packet_cache) for x in val
                 ]
             else:
-                return _cpy(val.fields)
+                return (_cpy(val.fields), val.payload.raw_packet_cache)
         elif fld.islist or fld.ismutable:
             return _cpy(val)
         return None
@@ -2511,13 +2514,25 @@ def rfc(cls, ret=False, legend=True):
     # when formatted, from its length in bits
     clsize = lambda x: 2 * x - 1  # type: Callable[[int], int]
     ident = 0  # Fields UUID
+
     # Generate packet groups
-    for f in cls.fields_desc:
-        flen = int(f.sz * 8)
+    def _iterfields() -> Iterator[Tuple[str, int]]:
+        for f in cls.fields_desc:
+            # Fancy field name
+            fname = f.name.upper().replace("_", " ")
+            fsize = int(f.sz * 8)
+            yield fname, fsize
+            # Add padding optionally
+            if isinstance(f, PadField):
+                if isinstance(f._align, tuple):
+                    pad = - cur_len % (f._align[0] * 8)
+                else:
+                    pad = - cur_len % (f._align * 8)
+                if pad:
+                    yield "padding", pad
+    for fname, flen in _iterfields():
         cur_len += flen
         ident += 1
-        # Fancy field name
-        fname = f.name.upper().replace("_", " ")
         # The field might exceed the current line or
         # take more than one line. Copy it as required
         while True:

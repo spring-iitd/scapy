@@ -14,7 +14,7 @@ import time
 
 from scapy.ansmachine import AnsweringMachine
 from scapy.arch import get_if_addr, get_if_hwaddr
-from scapy.base_classes import Gen, Net
+from scapy.base_classes import Gen, Net, _ScopedIP
 from scapy.compat import chb
 from scapy.config import conf
 from scapy import consts
@@ -134,7 +134,7 @@ _arp_cache = conf.netcache.new_cache("arp_cache", 120)
 def getmacbyip(ip, chainCC=0):
     # type: (str, int) -> Optional[str]
     """
-    Returns the MAC address used to reach a given IP address.
+    Returns the destination MAC address used to reach a given IP address.
 
     This will follow the routing table and will issue an ARP request if
     necessary. Special cases (multicast, etc.) are also handled.
@@ -228,8 +228,6 @@ class SourceMACField(MACField):
         # type: (Optional[Packet], Optional[str]) -> str
         if x is None:
             iff = self.getif(pkt)
-            if iff is None:
-                iff = conf.iface
             if iff:
                 x = resolve_iface(iff).mac
             if x is None:
@@ -494,13 +492,13 @@ class ARP(Packet):
         ),
         MultipleTypeField(
             [
-                (SourceIPField("psrc", "pdst"),
+                (SourceIPField("psrc"),
                  (lambda pkt: pkt.ptype == 0x0800 and pkt.plen == 4,
                   lambda pkt, val: pkt.ptype == 0x0800 and (
                       pkt.plen == 4 or (pkt.plen is None and
                                         (val is None or valid_net(val)))
                   ))),
-                (SourceIP6Field("psrc", "pdst"),
+                (SourceIP6Field("psrc"),
                  (lambda pkt: pkt.ptype == 0x86dd and pkt.plen == 16,
                   lambda pkt, val: pkt.ptype == 0x86dd and (
                       pkt.plen == 16 or (pkt.plen is None and
@@ -563,12 +561,15 @@ class ARP(Packet):
         fld, dst = cast(Tuple[MultipleTypeField, str],
                         self.getfield_and_val("pdst"))
         fld_inner, dst = fld._find_fld_pkt_val(self, dst)
+        scope = None
+        if isinstance(dst, (Net, _ScopedIP)):
+            scope = dst.scope
         if isinstance(dst, Gen):
             dst = next(iter(dst))
         if isinstance(fld_inner, IP6Field):
-            return conf.route6.route(dst)
+            return conf.route6.route(dst, dev=scope)
         elif isinstance(fld_inner, IPField):
-            return conf.route.route(dst)
+            return conf.route.route(dst, dev=scope)
         else:
             return None, None, None
 
@@ -910,6 +911,7 @@ def arp_mitm(
 
         $ sysctl net.ipv4.conf.virbr0.send_redirects=0  # virbr0 = interface
         $ sysctl net.ipv4.ip_forward=1
+        $ sudo iptables -t mangle -A PREROUTING -j TTL --ttl-inc 1
         $ sudo scapy
         >>> arp_mitm("192.168.122.156", "192.168.122.17")
 
@@ -986,7 +988,7 @@ def arp_mitm(
              for ipa, maca in tup1
              for ipb, macb in tup2
              for x in
-             Ether(dst=maca, src=macb) /
+             Ether(dst="ff:ff:ff:ff:ff:ff", src=macb) /
              ARP(op="who-has", psrc=ipb, pdst=ipa,
                  hwsrc=macb, hwdst="00:00:00:00:00:00")
              ),
@@ -994,7 +996,7 @@ def arp_mitm(
              for ipb, macb in tup2
              for ipa, maca in tup1
              for x in
-             Ether(dst=macb, src=maca) /
+             Ether(dst="ff:ff:ff:ff:ff:ff", src=maca) /
              ARP(op="who-has", psrc=ipa, pdst=ipb,
                  hwsrc=maca, hwdst="00:00:00:00:00:00")
              ),
